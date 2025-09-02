@@ -53,6 +53,7 @@ dev = [
     "pre-commit",
     "pytest-asyncio",
     "griffe-pydantic",
+    "swe-rex[docker]",
     "swe-rex[modal]",
     "swe-rex[fargate]",
     "swe-rex[daytona]",
@@ -67,6 +68,9 @@ fargate = [
 daytona = [
     "daytona",
     "daytona-sdk >= 0.21",
+]
+docker = [
+    "docker>=7.1.0",
 ]
 
 [tool.setuptools]

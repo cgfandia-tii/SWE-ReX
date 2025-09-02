@@ -27,7 +27,7 @@ class DockerDeploymentConfig(BaseModel):
     """The name of the container image to use."""
     port: int | None = None
     """The port that the container connects to. If None, a free port is found."""
-    docker_args: list[str] = []
+    docker_args: list[str] = Field(default_factory=list)
     """Additional arguments to pass to the container run command. If --platform is specified here, it will be moved to the platform field."""
     startup_timeout: float = 180.0
     """The time to wait for the runtime to start."""
@@ -43,6 +43,24 @@ class DockerDeploymentConfig(BaseModel):
     """Whether to remove the container after it has stopped."""
     container_runtime: Literal["docker", "podman"] = "docker"
     """The container runtime to use (docker or podman)."""
+
+    # Engine/connection settings for interacting with Docker without requiring docker CLI inside the SWE-Rex container.
+    engine: Literal["auto", "sdk", "cli"] = "auto"
+    """Select the engine used to interact with Docker:
+    - 'sdk': use Python Docker SDK (no docker CLI required)
+    - 'cli': use docker/podman CLI via subprocess
+    - 'auto': prefer SDK if available (and container_runtime is 'docker'), otherwise fallback to CLI
+    """
+    docker_endpoint: str | None = None
+    """Docker endpoint for SDK mode, e.g. unix:///var/run/docker.sock, tcp://dind:2375, ssh://user@host."""
+    docker_tls: bool = False
+    """Enable TLS for tcp endpoint in SDK mode."""
+    docker_cert_path: str | None = None
+    """Path to TLS certs for SDK mode (typically containing ca.pem, cert.pem, key.pem)."""
+    docker_use_ssh: bool = False
+    """Use local SSH client for ssh:// endpoints in SDK mode."""
+    docker_env: dict[str, str] = Field(default_factory=dict)
+    """Extra environment variables to pass to docker/podman CLI subprocesses (e.g., DOCKER_HOST)"""
 
     type: Literal["docker"] = "docker"
     """Discriminator for (de)serialization/CLI. Do not change."""
