@@ -20,13 +20,72 @@ class LocalDeploymentConfig(BaseModel):
         return LocalDeployment.from_config(self)
 
 
+# ----------------------------- Docker typed helpers -----------------------------
+
+
+class PortBinding(BaseModel):
+    """A port publish/bind definition."""
+
+    container_port: int
+    host_port: int | None = None  # None => request ephemeral host port
+    protocol: Literal["tcp", "udp"] = "tcp"
+    host_ip: str | None = None  # e.g., "0.0.0.0" or "127.0.0.1"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class VolumeMount(BaseModel):
+    """A volume or bind mount."""
+
+    source: str  # host path or named volume
+    target: str  # container path
+    mode: Literal["ro", "rw"] = "rw"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RestartPolicy(BaseModel):
+    """Restart policy for the container."""
+
+    name: Literal["no", "on-failure", "always", "unless-stopped"] = "no"
+    maximum_retry_count: int | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class Healthcheck(BaseModel):
+    """Container healthcheck configuration."""
+
+    # E.g., ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/is_alive || exit 1"]
+    test: list[str] | Literal["NONE"] = Field(default_factory=list)
+    interval_s: float | None = None
+    timeout_s: float | None = None
+    retries: int | None = None
+    start_period_s: float | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class Resources(BaseModel):
+    """Basic container resource constraints."""
+
+    memory: str | int | None = None  # e.g., "1g" or bytes
+    cpus: float | None = None  # maps to nano_cpus in SDK
+    shm_size: int | None = None
+    # Simple map of ulimits (e.g., {"nofile": "262144:262144"}); for advanced usage add a structured type.
+    ulimits: dict[str, str] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class DockerDeploymentConfig(BaseModel):
     """Configuration for running locally in a Docker or Podman container."""
 
     image: str = "python:3.11"
     """The name of the container image to use."""
     port: int | None = None
-    """The port that the container connects to. If None, a free port is found."""
+    """The port that the container connects to. If None, a free port is found.
+    Backward-compat primary port used when 'ports' is not provided."""
     docker_args: list[str] = Field(default_factory=list)
     """Additional arguments to pass to the container run command. If --platform is specified here, it will be moved to the platform field."""
     startup_timeout: float = 180.0
@@ -61,6 +120,77 @@ class DockerDeploymentConfig(BaseModel):
     """Use local SSH client for ssh:// endpoints in SDK mode."""
     docker_env: dict[str, str] = Field(default_factory=dict)
     """Extra environment variables to pass to docker/podman CLI subprocesses (e.g., DOCKER_HOST)"""
+
+    # New: runtime host/port inference and flexible container options
+    runtime_host: str | Literal["auto"] = "auto"
+    """Host used by the SWE‑ReX client to reach the container's service.
+    When 'auto', infer from docker_endpoint/DOCKER_HOST:
+      - unix:///…  -> http://127.0.0.1
+      - tcp://h:p  -> http://h
+      - ssh://u@h  -> http://h
+    Defaults to http://127.0.0.1 if inference not possible."""
+    runtime_container_port: int = 8000
+    """Container port where the SWE‑ReX API listens."""
+
+    # Access mode and network host selection
+    runtime_access_mode: Literal["auto", "host", "network"] = "auto"
+    """How the client should reach the runtime:
+    - 'host': publish ports or use host network (current default behavior)
+    - 'network': do not publish ports; connect via Docker network DNS name
+    - 'auto': if 'ports' are configured, treat as 'host'; otherwise, if 'runtime_host' is explicitly set to a non-'auto' value that doesn't look like a host IP, you can use that. Defaults to legacy 'host'-like behavior.
+    """
+    runtime_network_host: str | None = None
+    """DNS name to use when runtime_access_mode='network' (defaults to container_name or first alias)."""
+    runtime_host_scheme: Literal["http", "https"] = "http"
+    """Scheme to use when building the runtime URL in network mode."""
+
+    ports: list[PortBinding] = Field(default_factory=list)
+    """Publish rules. If empty, a single publish from 'port' (host) to runtime_container_port will be used."""
+
+    env: dict[str, str] = Field(default_factory=dict)
+    """Environment variables to set in the container."""
+
+    volumes: list[VolumeMount] = Field(default_factory=list)
+    """List of bind/volume mounts."""
+
+    labels: dict[str, str] = Field(default_factory=dict)
+    """Labels to apply to the container."""
+
+    networks: list[str] = Field(default_factory=list)
+    """Attach container to networks. If one is provided, use it at run; further networks may require post-run attach."""
+
+    network_aliases: dict[str, list[str]] = Field(default_factory=dict)
+    """Per-network aliases for the container, e.g., {'rexnet': ['rex']}"""
+
+    network_mode: str | None = None
+    """Network mode, e.g., 'host'. Takes precedence over 'networks' when set."""
+
+    restart_policy: RestartPolicy | None = None
+    """Restart policy."""
+
+    healthcheck: Healthcheck | None = None
+    """Optional container healthcheck."""
+
+    resources: Resources | None = None
+    """Basic resource limits."""
+
+    workdir: str | None = None
+    """Working directory in the container."""
+
+    user: str | int | None = None
+    """User (name or UID[:GID]) to run as."""
+
+    entrypoint: list[str] | None = None
+    """Entrypoint override."""
+
+    cmd: list[str] | None = None
+    """Command to append/override the default start command."""
+
+    command_mode: Literal["append", "override"] = "append"
+    """Append user cmd to internal start command, or override it entirely."""
+
+    container_name: str | None = None
+    """Optional fixed container name; if not set, a unique name is generated."""
 
     type: Literal["docker"] = "docker"
     """Discriminator for (de)serialization/CLI. Do not change."""
