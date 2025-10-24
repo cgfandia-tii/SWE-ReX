@@ -186,6 +186,15 @@ class ReadFileRequest(BaseModel):
     path: str
     """Path to read from."""
 
+    offset: int | None = None
+    """Line number to start reading from (0-based). Use with limit for pagination."""
+
+    limit: int | None = None
+    """Maximum number of lines to read. None means read all lines (up to default limit of 2000)."""
+
+    line_numbers: bool = True
+    """Whether to include line numbers in the output (format: '00001| content')."""
+
     encoding: str | None = None
     """Encoding to use when reading the file. None means default encoding. 
     This is the same as the `encoding` argument of `Path.read_text()`."""
@@ -197,6 +206,20 @@ class ReadFileRequest(BaseModel):
 
 class ReadFileResponse(BaseModel):
     content: str = ""
+    truncated: bool = False
+    """Whether the content was truncated due to size limits."""
+
+    total_lines: int = 0
+    """Total number of lines in the file."""
+
+    lines_shown: tuple[int, int] | None = None
+    """Range of lines shown (start, end) if truncated."""
+
+    is_binary: bool = False
+    """Whether the file was detected as binary."""
+
+    mime_type: str | None = None
+    """MIME type of the file if detected."""
 
 
 class WriteFileRequest(BaseModel):

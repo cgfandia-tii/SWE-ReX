@@ -58,12 +58,12 @@ from swerex.utils.log import get_logger
 __all__ = ["LocalRuntime", "BashSession"]
 
 
-def _split_bash_command(inpt: str) -> list[str]:
+def _split_bash_command(input: str) -> list[str]:
     r"""Split a bash command with linebreaks, escaped newlines, and heredocs into a list of
     individual commands.
 
     Args:
-        inpt: The input string to split into commands.
+        input: The input string to split into commands.
     Returns:
         A list of commands as strings.
 
@@ -73,11 +73,11 @@ def _split_bash_command(inpt: str) -> list[str]:
     "cmd1\\\n asdf" is one command (because the linebreak is escaped)
     "cmd1<<EOF\na\nb\nEOF" is one command (because of the heredoc)
     """
-    inpt = inpt.strip()
-    if not inpt or all(l.strip().startswith("#") for l in inpt.splitlines()):
+    input = input.strip()
+    if not input or all(l.strip().startswith("#") for l in input.splitlines()):
         # bashlex can't deal with empty strings or the like :/
         return []
-    parsed = bashlex.parse(inpt)
+    parsed = bashlex.parse(input)
     cmd_strings = []
 
     def find_range(cmd: bashlex.ast.node) -> tuple[int, int]:
@@ -91,7 +91,7 @@ def _split_bash_command(inpt: str) -> list[str]:
 
     for cmd in parsed:
         start, end = find_range(cmd)
-        cmd_strings.append(inpt[start:end])
+        cmd_strings.append(input[start:end])
     return cmd_strings
 
 
@@ -148,6 +148,202 @@ def _find_with_fuzzy_matching(content: str, search: str) -> list[tuple[int, int]
             matches.append((start_idx, end_idx))
 
     return matches
+
+
+def _is_binary_file(path: Path) -> bool:
+    """Detect if a file is binary by extension and content analysis.
+
+    Returns:
+        True if the file is binary, False if it's text.
+    """
+    # Check by extension first (fast path)
+    binary_extensions = {
+        ".pyc",
+        ".pyo",
+        ".so",
+        ".dll",
+        ".dylib",
+        ".exe",
+        ".bin",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".jar",
+        ".war",
+        ".ear",
+        ".class",
+        ".o",
+        ".a",
+        ".lib",
+        ".wasm",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".webp",
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".odt",
+        ".ods",
+        ".odp",
+        ".mp3",
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".wmv",
+        ".flv",
+        ".wav",
+        ".flac",
+    }
+
+    if path.suffix.lower() in binary_extensions:
+        return True
+
+    # Content-based detection
+    try:
+        if not path.exists():
+            return False
+
+        size = path.stat().st_size
+        if size == 0:
+            return False
+
+        # Read first 8KB for analysis
+        chunk_size = min(8192, size)
+        with open(path, "rb") as f:
+            chunk = f.read(chunk_size)
+
+        # Check for null bytes (strong indicator of binary)
+        if b"\x00" in chunk:
+            return True
+
+        # Count non-printable characters
+        non_printable = 0
+        for byte in chunk:
+            # Allow common whitespace (tab, newline, carriage return)
+            if byte < 9 or (13 < byte < 32 and byte != 10):
+                non_printable += 1
+
+        # If >30% non-printable, consider it binary
+        return (non_printable / len(chunk)) > 0.3
+
+    except Exception:
+        # On any error, assume text (safe default)
+        return False
+
+
+def _suggest_similar_files(path: Path, max_suggestions: int = 5) -> list[str]:
+    """Suggest similar filenames when a file is not found.
+
+    Args:
+        path: The path that was not found
+        max_suggestions: Maximum number of suggestions to return
+
+    Returns:
+        List of suggested file paths
+    """
+    if not path.parent.exists():
+        return []
+
+    basename = path.name.lower()
+    suggestions = []
+
+    try:
+        for entry in path.parent.iterdir():
+            entry_lower = entry.name.lower()
+
+            # Fuzzy match: substring or similar names
+            if basename in entry_lower or entry_lower in basename:
+                suggestions.append(str(entry))
+            elif _levenshtein_distance(basename, entry_lower) <= 2:
+                suggestions.append(str(entry))
+
+    except (PermissionError, OSError):
+        return []
+
+    return suggestions[:max_suggestions]
+
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Calculate Levenshtein distance between two strings.
+
+    Args:
+        s1: First string
+        s2: Second string
+
+    Returns:
+        Edit distance between the strings
+    """
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # j+1 instead of j since previous_row and current_row are one character longer than s2
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
+
+
+def _detect_mime_type(path: Path) -> str | None:
+    """Detect MIME type based on file extension.
+
+    Args:
+        path: File path
+
+    Returns:
+        MIME type string or None if unknown
+    """
+    mime_types = {
+        ".py": "text/x-python",
+        ".js": "text/javascript",
+        ".ts": "text/typescript",
+        ".jsx": "text/jsx",
+        ".tsx": "text/tsx",
+        ".java": "text/x-java",
+        ".c": "text/x-c",
+        ".cpp": "text/x-c++",
+        ".h": "text/x-c",
+        ".hpp": "text/x-c++",
+        ".rs": "text/x-rust",
+        ".go": "text/x-go",
+        ".rb": "text/x-ruby",
+        ".php": "text/x-php",
+        ".html": "text/html",
+        ".css": "text/css",
+        ".json": "application/json",
+        ".xml": "application/xml",
+        ".yaml": "text/yaml",
+        ".yml": "text/yaml",
+        ".toml": "text/toml",
+        ".md": "text/markdown",
+        ".txt": "text/plain",
+        ".sh": "text/x-shellscript",
+        ".bash": "text/x-shellscript",
+        ".sql": "text/x-sql",
+    }
+
+    return mime_types.get(path.suffix.lower())
 
 
 class Session(ABC):
@@ -487,9 +683,100 @@ class LocalRuntime(AbstractRuntime):
         return r
 
     async def read_file(self, request: ReadFileRequest) -> ReadFileResponse:
-        """Reads a file"""
-        content = Path(request.path).read_text(encoding=request.encoding, errors=request.errors)
-        return ReadFileResponse(content=content)
+        """Reads a file with pagination, line numbers, and binary detection.
+
+        Features:
+        - Pagination with offset/limit
+        - Line numbering (format: '00001| content')
+        - Binary file detection with helpful error messages
+        - File-not-found suggestions
+        - Line length truncation for minified files
+        - MIME type detection
+
+        Raises:
+            FileNotFoundError: If file doesn't exist (with suggestions if available)
+            ValueError: If file is binary
+        """
+        path = Path(request.path)
+
+        # Check if file exists
+        if not path.exists():
+            suggestions = _suggest_similar_files(path)
+            if suggestions:
+                suggestions_str = "\n".join(f"  - {s}" for s in suggestions)
+                msg = f"File not found: {path}\n\nDid you mean one of these?\n{suggestions_str}"
+            else:
+                msg = f"File not found: {path}"
+            raise FileNotFoundError(msg)
+
+        # Check if file is binary
+        if _is_binary_file(path):
+            msg = f"Cannot read binary file: {path}"
+            raise ValueError(msg)
+
+        # Read file content
+        try:
+            content = path.read_text(encoding=request.encoding, errors=request.errors)
+        except UnicodeDecodeError as e:
+            msg = f"Failed to decode file {path}: {e}. File may be binary or use unsupported encoding."
+            raise ValueError(msg) from e
+
+        # Split into lines
+        lines = content.split("\n")
+        total_lines = len(lines)
+
+        # Apply pagination
+        default_limit = 2000
+        offset = request.offset or 0
+        limit = request.limit if request.limit is not None else default_limit
+
+        # Validate offset
+        if offset < 0:
+            msg = f"Invalid offset {offset}: must be >= 0"
+            raise ValueError(msg)
+
+        if offset >= total_lines:
+            msg = f"Offset {offset} exceeds file length ({total_lines} lines)"
+            raise ValueError(msg)
+
+        # Calculate end index
+        end = min(offset + limit, total_lines)
+        selected_lines = lines[offset:end]
+
+        # Truncate long lines (prevent minified files from causing issues)
+        max_line_length = 2000
+        truncated_lines = []
+        for line in selected_lines:
+            if len(line) > max_line_length:
+                truncated_lines.append(line[:max_line_length] + "...")
+            else:
+                truncated_lines.append(line)
+
+        # Format with line numbers if requested
+        if request.line_numbers:
+            formatted_lines = []
+            for i, line in enumerate(truncated_lines):
+                line_num = offset + i + 1  # 1-based line numbers
+                formatted_lines.append(f"{line_num:05d}| {line}")
+            content_str = "\n".join(formatted_lines)
+        else:
+            content_str = "\n".join(truncated_lines)
+
+        # Determine if truncated
+        truncated = end < total_lines
+        lines_shown = (offset + 1, end) if truncated or offset > 0 else None
+
+        # Detect MIME type
+        mime_type = _detect_mime_type(path)
+
+        return ReadFileResponse(
+            content=content_str,
+            truncated=truncated,
+            total_lines=total_lines,
+            lines_shown=lines_shown,
+            is_binary=False,
+            mime_type=mime_type,
+        )
 
     async def write_file(self, request: WriteFileRequest) -> WriteFileResponse:
         """Writes a file"""

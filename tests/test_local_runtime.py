@@ -16,7 +16,8 @@ async def test_upload_file(local_runtime: LocalRuntime, tmp_path: Path):
     file_path.write_text("test")
     tmp_target = tmp_path / "target.txt"
     await local_runtime.upload(UploadRequest(source_path=str(file_path), target_path=str(tmp_target)))
-    assert (await local_runtime.read_file(ReadFileRequest(path=str(tmp_target)))).content == "test"
+    result = await local_runtime.read_file(ReadFileRequest(path=str(tmp_target), line_numbers=False))
+    assert result.content == "test"
 
 
 async def test_upload_directory(local_runtime: LocalRuntime, tmp_path: Path):
@@ -26,5 +27,7 @@ async def test_upload_directory(local_runtime: LocalRuntime, tmp_path: Path):
     (dir_path / "file2.txt").write_text("test2")
     tmp_target = tmp_path / "target_dir"
     await local_runtime.upload(UploadRequest(source_path=str(dir_path), target_path=str(tmp_target)))
-    assert (await local_runtime.read_file(ReadFileRequest(path=str(tmp_target / "file1.txt")))).content == "test1"
-    assert (await local_runtime.read_file(ReadFileRequest(path=str(tmp_target / "file2.txt")))).content == "test2"
+    result1 = await local_runtime.read_file(ReadFileRequest(path=str(tmp_target / "file1.txt"), line_numbers=False))
+    result2 = await local_runtime.read_file(ReadFileRequest(path=str(tmp_target / "file2.txt"), line_numbers=False))
+    assert result1.content == "test1"
+    assert result2.content == "test2"
