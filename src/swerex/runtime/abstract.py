@@ -217,6 +217,27 @@ class UploadResponse(BaseModel):
     pass
 
 
+class EditFileRequest(BaseModel):
+    path: str
+    """Path to file to edit."""
+
+    old_text: str
+    """Exact text to find and replace. Include surrounding context
+    (3+ lines before/after) to ensure unique match."""
+
+    new_text: str
+    """Replacement text."""
+
+    expected_occurrences: int = 1
+    """Expected number of matches. Must match exactly."""
+
+
+class EditFileResponse(BaseModel):
+    occurrences_replaced: int
+    diff: str = ""
+    """Unified diff showing changes."""
+
+
 class CloseResponse(BaseModel):
     pass
 
@@ -280,6 +301,11 @@ class AbstractRuntime(ABC):
     @abstractmethod
     async def upload(self, request: UploadRequest) -> UploadResponse:
         """Uploads a file from the local machine to the remote machine."""
+        pass
+
+    @abstractmethod
+    async def edit_file(self, request: EditFileRequest) -> EditFileResponse:
+        """Edits a file by finding and replacing text."""
         pass
 
     @abstractmethod

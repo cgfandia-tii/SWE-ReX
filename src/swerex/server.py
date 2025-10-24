@@ -21,6 +21,7 @@ from swerex.runtime.abstract import (
     CloseSessionRequest,
     Command,
     CreateSessionRequest,
+    EditFileRequest,
     ReadFileRequest,
     UploadResponse,
     WriteFileRequest,
@@ -157,6 +158,11 @@ async def read_file(request: ReadFileRequest):
 @app.post("/write_file")
 async def write_file(request: WriteFileRequest):
     return serialize_model(await runtime.write_file(request))
+
+
+@app.post("/edit_file")
+async def edit_file(request: EditFileRequest):
+    return serialize_model(await runtime.edit_file(request))
 
 
 @app.post("/upload")

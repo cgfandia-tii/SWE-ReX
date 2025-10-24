@@ -24,6 +24,8 @@ from swerex.runtime.abstract import (
     CommandResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    EditFileRequest,
+    EditFileResponse,
     IsAliveResponse,
     Observation,
     ReadFileRequest,
@@ -259,6 +261,10 @@ class RemoteRuntime(AbstractRuntime):
             else:
                 msg = f"Source path {source} is not a file or directory"
                 raise ValueError(msg)
+
+    async def edit_file(self, request: EditFileRequest) -> EditFileResponse:
+        """Edits a file"""
+        return await self._request("edit_file", request, EditFileResponse)
 
     async def close(self) -> CloseResponse:
         """Closes the runtime."""

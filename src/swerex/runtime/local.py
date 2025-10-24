@@ -6,6 +6,7 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,8 @@ from swerex.runtime.abstract import (
     CreateBashSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    EditFileRequest,
+    EditFileResponse,
     IsAliveResponse,
     Observation,
     ReadFileRequest,
@@ -112,6 +115,39 @@ def _check_bash_command(command: str) -> None:
     )
     exc = BashIncorrectSyntaxError(msg, extra_info={"bash_stdout": stdout, "bash_stderr": stderr})
     raise exc
+
+
+def _find_with_fuzzy_matching(content: str, search: str) -> list[tuple[int, int]]:
+    """Find all occurrences using multiple strategies.
+
+    Returns list of (start_idx, end_idx) tuples.
+    """
+    matches = []
+
+    # Strategy 1: Exact match
+    start = 0
+    while True:
+        idx = content.find(search, start)
+        if idx == -1:
+            break
+        matches.append((idx, idx + len(search)))
+        start = idx + 1
+
+    if matches:
+        return matches
+
+    # Strategy 2: Line-trimmed match (common with copy-paste)
+    content_lines = content.split("\n")
+    search_lines = search.split("\n")
+
+    for i in range(len(content_lines) - len(search_lines) + 1):
+        if all(content_lines[i + j].strip() == search_lines[j].strip() for j in range(len(search_lines))):
+            # Found match - calculate character positions
+            start_idx = sum(len(line) + 1 for line in content_lines[:i])
+            end_idx = start_idx + sum(len(content_lines[i + j]) + 1 for j in range(len(search_lines))) - 1
+            matches.append((start_idx, end_idx))
+
+    return matches
 
 
 class Session(ABC):
@@ -468,6 +504,78 @@ class LocalRuntime(AbstractRuntime):
         else:
             shutil.copy(request.source_path, request.target_path)
         return UploadResponse()
+
+    async def edit_file(self, request: EditFileRequest) -> EditFileResponse:
+        """Edit file by finding and replacing text.
+
+        Raises:
+            FileNotFoundError: If file doesn't exist and old_text is not empty.
+            ValueError: If occurrence count doesn't match expected.
+        """
+        path = Path(request.path)
+
+        # Handle file creation
+        if request.old_text == "":
+            if path.exists():
+                msg = f"Cannot create {path}: file already exists"
+                raise ValueError(msg)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(request.new_text)
+            diff_lines = list(
+                unified_diff(
+                    [],
+                    request.new_text.splitlines(keepends=True),
+                    fromfile=f"a/{path.name}",
+                    tofile=f"b/{path.name}",
+                    lineterm="",
+                )
+            )
+            return EditFileResponse(occurrences_replaced=0, diff="".join(diff_lines))
+
+        # Read existing file
+        if not path.exists():
+            msg = f"{path} not found. Use empty old_text to create new file."
+            raise FileNotFoundError(msg)
+
+        content = path.read_text()
+
+        # Find all occurrences
+        matches = _find_with_fuzzy_matching(content, request.old_text)
+
+        if len(matches) == 0:
+            msg = (
+                f"old_text not found in {path}. Ensure exact match including whitespace. "
+                f"Include 3+ lines of context before/after the change."
+            )
+            raise ValueError(msg)
+
+        if len(matches) != request.expected_occurrences:
+            msg = (
+                f"Expected {request.expected_occurrences} occurrence(s) but found {len(matches)}. "
+                f"Add more context to old_text to uniquely identify the location."
+            )
+            raise ValueError(msg)
+
+        # Perform replacement (use the actual matched text for safety)
+        new_content = content
+        for start, end in reversed(matches):  # Reverse to maintain indices
+            new_content = new_content[:start] + request.new_text + new_content[end:]
+
+        # Generate diff
+        diff_lines = list(
+            unified_diff(
+                content.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=f"a/{path.name}",
+                tofile=f"b/{path.name}",
+                lineterm="",
+            )
+        )
+
+        # Write changes
+        path.write_text(new_content)
+
+        return EditFileResponse(occurrences_replaced=len(matches), diff="".join(diff_lines))
 
     async def close(self) -> CloseResponse:
         """Closes the runtime."""
