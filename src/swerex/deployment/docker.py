@@ -989,6 +989,231 @@ class DockerDeployment(AbstractDeployment):
                     except Exception:
                         self.logger.error(f"Failed to remove image {self._config.image}", exc_info=True)
 
+    @classmethod
+    async def cleanup_container(
+        cls,
+        identifier: str,
+        config: DockerDeploymentConfig | None = None,
+        timeout: int = 10,
+        remove: bool = True,
+        logger: logging.Logger | None = None,
+    ) -> bool:
+        """Stop and optionally remove a container by ID or name using proper Docker configuration.
+
+        This method enables cross-process container cleanup by reusing the deployment's
+        Docker client initialization logic without requiring an active deployment instance.
+
+        Args:
+            identifier: Container ID or name to cleanup
+            config: Docker deployment config for client initialization. If None, uses default from_env() behavior.
+            timeout: Seconds to wait for graceful stop before force kill
+            remove: Whether to remove the container after stopping
+            logger: Optional logger instance
+
+        Returns:
+            True if container was stopped/removed, False if container not found
+
+        Raises:
+            RuntimeError: If Docker client initialization or container operations fail
+
+        Example:
+            >>> config = DockerDeploymentConfig(
+            ...     image="ubuntu",
+            ...     docker_endpoint="tcp://docker-host:2375"
+            ... )
+            >>> await DockerDeployment.cleanup_container("my-container", config)
+            True
+        """
+        log = logger or get_logger("swerex.cleanup")
+
+        # Determine engine and runtime
+        if config:
+            engine = config.engine
+            container_runtime = config.container_runtime
+        else:
+            engine = "auto"
+            container_runtime = "docker"
+
+        # Resolve engine (reuse existing logic)
+        if engine == "auto":
+            if container_runtime != "docker":
+                engine = "cli"
+            else:
+                engine = "sdk" if docker is not None else "cli"
+        elif engine == "sdk":
+            if docker is None:
+                msg = "Docker SDK engine requested but 'docker' package not installed"
+                raise RuntimeError(msg)
+            if container_runtime != "docker":
+                msg = "Docker SDK engine requires container_runtime='docker'"
+                raise RuntimeError(msg)
+
+        # Delegate to engine-specific implementation
+        if engine == "sdk":
+            return await cls._cleanup_container_sdk(identifier, config, timeout, remove, log)
+        else:
+            return await cls._cleanup_container_cli(identifier, config, timeout, remove, log)
+
+    @classmethod
+    async def _cleanup_container_sdk(
+        cls,
+        identifier: str,
+        config: DockerDeploymentConfig | None,
+        timeout: int,
+        remove: bool,
+        logger: logging.Logger,
+    ) -> bool:
+        """Cleanup using Docker SDK (reuses _ensure_sdk_client logic)."""
+        try:
+            # Create temporary deployment instance for client initialization
+            # This reuses all the complex initialization logic in _ensure_sdk_client
+            temp_config = config if config else DockerDeploymentConfig(image="dummy")
+            temp_deployment = cls(**temp_config.model_dump())
+            client = temp_deployment._ensure_sdk_client()
+
+            if client is None:
+                msg = "Failed to initialize Docker SDK client"
+                raise RuntimeError(msg)
+
+            # Get container
+            try:
+                container = client.containers.get(identifier)
+            except Exception as e:
+                # Check for NotFound error (docker.errors.NotFound)
+                error_name = type(e).__name__
+                error_msg = str(e)
+                if "NotFound" in error_name or "NotFound" in error_msg or "404" in error_msg:
+                    logger.debug(f"Container {identifier} not found (may already be removed)")
+                    return False
+                msg = f"Failed to get container {identifier}: {e}"
+                raise RuntimeError(msg) from e
+
+            logger.info(f"Stopping container {identifier} (timeout={timeout}s)")
+
+            # Try graceful stop first
+            try:
+                container.stop(timeout=timeout)
+            except Exception as e:
+                logger.warning(f"Graceful stop failed for {identifier}, forcing kill: {e}")
+                try:
+                    container.kill()
+                except Exception as kill_error:
+                    logger.error(f"Failed to kill container {identifier}: {kill_error}")
+                    msg = f"Failed to stop container {identifier}"
+                    raise RuntimeError(msg) from kill_error
+
+            # Remove if requested
+            if remove:
+                try:
+                    container.remove(force=True)
+                    logger.info(f"Removed container {identifier}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove container {identifier}: {e}")
+                    # Don't raise here - stopping succeeded, removal is optional
+
+            return True
+
+        except RuntimeError:
+            # Re-raise RuntimeErrors as-is
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during container cleanup {identifier}: {e}")
+            msg = f"Container cleanup failed: {e}"
+            raise RuntimeError(msg) from e
+
+    @classmethod
+    async def _cleanup_container_cli(
+        cls,
+        identifier: str,
+        config: DockerDeploymentConfig | None,
+        timeout: int,
+        remove: bool,
+        logger: logging.Logger,
+    ) -> bool:
+        """Cleanup using Docker/Podman CLI."""
+        # Get runtime and environment
+        if config:
+            runtime = config.container_runtime
+            env = os.environ.copy()
+            env.update(config.docker_env)
+        else:
+            runtime = "docker"
+            env = os.environ.copy()
+
+        try:
+            # Try graceful stop with timeout
+            result = subprocess.run(
+                [runtime, "stop", "-t", str(timeout), identifier],
+                capture_output=True,
+                timeout=timeout + 5,  # Add buffer to subprocess timeout
+                env=env,
+            )
+
+            if result.returncode == 0:
+                logger.info(f"Stopped container {identifier} via {runtime} CLI")
+            else:
+                stderr = result.stderr.decode() if result.stderr else ""
+
+                # Check if container doesn't exist
+                if "No such container" in stderr or "no container with" in stderr.lower():
+                    logger.debug(f"Container {identifier} not found")
+                    return False
+
+                # Try force kill as fallback
+                logger.warning(f"Graceful stop failed for {identifier}, forcing kill")
+                try:
+                    subprocess.run(
+                        [runtime, "kill", identifier],
+                        check=True,
+                        capture_output=True,
+                        timeout=10,
+                        env=env,
+                    )
+                    logger.info(f"Force killed container {identifier}")
+                except subprocess.CalledProcessError as kill_error:
+                    stderr_kill = kill_error.stderr.decode() if kill_error.stderr else ""
+                    if "No such container" not in stderr_kill:
+                        msg = f"Failed to kill container {identifier}: {stderr_kill}"
+                        raise RuntimeError(msg) from kill_error
+                    # Container disappeared between stop and kill - that's ok
+                    return False
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Stop command timeout for {identifier}, forcing kill")
+            try:
+                subprocess.run(
+                    [runtime, "kill", identifier],
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                    env=env,
+                )
+            except subprocess.CalledProcessError as e:
+                msg = f"Failed to kill container after timeout: {e}"
+                raise RuntimeError(msg) from e
+        except FileNotFoundError as e:
+            msg = f"{runtime} CLI not found in PATH"
+            raise RuntimeError(msg) from e
+
+        # Remove if requested
+        if remove:
+            try:
+                subprocess.run(
+                    [runtime, "rm", "-f", identifier],
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                    env=env,
+                )
+                logger.info(f"Removed container {identifier}")
+            except subprocess.CalledProcessError as e:
+                stderr = e.stderr.decode() if e.stderr else ""
+                if "No such container" not in stderr:
+                    logger.warning(f"Failed to remove container {identifier}: {stderr}")
+                    # Don't raise - stopping succeeded
+
+        return True
+
     @property
     def runtime(self) -> RemoteRuntime:
         """Returns the runtime if running.
